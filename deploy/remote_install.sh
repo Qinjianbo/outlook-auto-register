@@ -2,7 +2,10 @@
 # 在目标机器上执行：安装依赖、节点身份、订阅代理、mihomo、注册 Zo 服务
 set -euo pipefail
 NODE_ID="${1:?node_id}"
-ROOT="${EMAIL_REGISTER_ROOT:-/home/workspace/Email-Register}"
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT，否则按脚本自身位置推导
+# （脚本在 <项目根>/deploy/ 下，往上一级就是项目根），不再写死路径。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$ROOT"
 
 export DEBIAN_FRONTEND=noninteractive

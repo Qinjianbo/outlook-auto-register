@@ -309,7 +309,15 @@ class SubscriptionProxyManager:
             cfg["mixed-port"] = MIXED_PORT
             cfg["external-controller"] = f"127.0.0.1:{API_PORT}"
             cfg["allow-lan"] = False
-            cfg["mode"] = "global"
+            # mihomo 模式：用 MIHOMO_MODE 环境变量可配，默认 rule。
+            # rule 模式下按下面的 rules（MATCH,AUTO）走 AUTO 组，面板切节点才生效；
+            # 之前写死的 global 模式走的是 GLOBAL 组，GLOBAL 默认 DIRECT，
+            # 流量会绕过 AUTO 组直接从本机 IP 出去。想恢复旧行为可设 MIHOMO_MODE=global。
+            _mode = os.environ.get("MIHOMO_MODE", "rule").strip().lower() or "rule"
+            if _mode not in ("rule", "global", "direct"):
+                logger.warning("[mihomo] MIHOMO_MODE=%r 无效，改用 rule", _mode)
+                _mode = "rule"
+            cfg["mode"] = _mode
             cfg["log-level"] = "info"
             cfg["global-client-fingerprint"] = "chrome"
             cfg["tcp-concurrent"] = True

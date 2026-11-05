@@ -1,7 +1,10 @@
 #!/bin/bash
 # 单独获取 RT：用已注册账号走 OAuth 回调
 set -euo pipefail
-ROOT="${EMAIL_REGISTER_ROOT:-/home/workspace/Email-Register}"
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT，否则按脚本自身位置推导
+# （脚本在 <项目根>/deploy/ 下，往上一级就是项目根），不再写死路径。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$ROOT"
 export DISPLAY="${DISPLAY:-:98}"
 export SUB_PROXY_FAST_START=1
@@ -49,7 +52,7 @@ for l in reversed(lines):
     if d.get('success') and d.get('email') and not d.get('refresh_token'):
         print(d['email'] + '|' + d.get('password',''))
         break
- 2>/dev/null)
+" 2>/dev/null)
 
 if [[ -z "$LAST_EMAIL" ]]; then
   echo "ERROR: 没有已注册但缺 RT 的账号，请先跑注册"

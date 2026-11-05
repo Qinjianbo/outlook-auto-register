@@ -1,7 +1,9 @@
 #!/bin/bash
 # 主节点：单机版仪表盘 + 守护 + 固定 ngrok 域名
 set -u
-ROOT="/home/workspace/Email-Register"
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT，否则就是脚本所在目录（项目根）。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$SCRIPT_DIR}"
 cd "$ROOT"
 
 export OUTLOOK_DASHBOARD_PORT="${OUTLOOK_DASHBOARD_PORT:-8765}"

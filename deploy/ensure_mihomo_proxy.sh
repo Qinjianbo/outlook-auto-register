@@ -1,7 +1,11 @@
 #!/bin/bash
 # 启动 mihomo + 校验 28888 出口；订阅失效时自动注册代理服务新账号并刷新订阅
 set -euo pipefail
-ROOT="${EMAIL_REGISTER_ROOT:-/home/workspace/Email-Register}"
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT 环境变量，否则按脚本自身位置推导
+# （脚本在 <项目根>/deploy/ 下，所以根目录就是脚本所在目录的上一级），
+# 不再写死 /home/workspace/Email-Register，装到哪里都能用。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$ROOT"
 export SUB_PROXY_FAST_START="${SUB_PROXY_FAST_START:-1}"
 set +e

@@ -5,7 +5,10 @@
 
 set -e
 NODE_NAME="${1:-unknown}"
-DEST="/home/workspace/Email-Register"
+# 部署目标目录：优先用 EMAIL_REGISTER_ROOT，否则按脚本位置推导
+# （脚本在 <项目根>/deploy/ 下，往上一级就是项目根），不再写死路径。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEST="${EMAIL_REGISTER_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 PYTHON=python3
 
 echo "=========================================="
@@ -70,7 +73,7 @@ export DISPLAY=:98
 
 # 7. 配置 systemd 服务
 echo "[7/8] 配置 systemd 服务..."
-cat > /etc/systemd/system/outlook-auto-register.service << 'EOF'
+cat > /etc/systemd/system/outlook-auto-register.service << EOF
 [Unit]
 Description=Outlook Auto Register Daemon
 After=network.target
@@ -78,15 +81,16 @@ After=network.target
 [Service]
 Type=simple
 User=root
-WorkingDirectory=/home/workspace/Email-Register
+WorkingDirectory=$DEST
 Environment=DISPLAY=:98
 Environment=PYTHONUNBUFFERED=1
 Environment=SUB_PROXY_FAST_START=1
-ExecStart=/usr/bin/python3 /home/workspace/Email-Register/outlook_daemon.py
+Environment=EMAIL_REGISTER_ROOT=$DEST
+ExecStart=/usr/bin/python3 $DEST/outlook_daemon.py
 Restart=always
 RestartSec=30
-StandardOutput=append:/home/workspace/Email-Register/runtime_outlook/logs/outlook_daemon.log
-StandardError=append:/home/workspace/Email-Register/runtime_outlook/logs/outlook_daemon_err.log
+StandardOutput=append:$DEST/runtime_outlook/logs/outlook_daemon.log
+StandardError=append:$DEST/runtime_outlook/logs/outlook_daemon_err.log
 
 [Install]
 WantedBy=multi-user.target

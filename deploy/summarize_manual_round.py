@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """统计某次手动轮次（默认 2026-06-07 18:56 UTC 起）各节点成功数。"""
-import json, subprocess, sys
+import json, os, subprocess, sys
 from pathlib import Path
 from datetime import datetime
 
 CUTOFF = "2026-06-07T18:55:00"
-ROOT = Path("/home/workspace/Email-Register")
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT，否则按文件位置推导，不再写死路径。
+ROOT = Path(os.environ.get("EMAIL_REGISTER_ROOT", "")) or Path(__file__).resolve().parent.parent
 CFG = ROOT / "deploy/nodes.json"
 
 def count_since(path: Path, cutoff: str):

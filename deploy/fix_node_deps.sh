@@ -1,7 +1,10 @@
 #!/bin/bash
 # zo3 / gcore：toml + 日志目录权限
 set -euo pipefail
-ROOT="${EMAIL_REGISTER_ROOT:-/home/workspace/Email-Register}"
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT，否则按脚本自身位置推导
+# （脚本在 <项目根>/deploy/ 下，往上一级就是项目根），不再写死路径。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 cd "$ROOT"
 export DEBIAN_FRONTEND=noninteractive
 sudo apt-get update -qq 2>/dev/null || apt-get update -qq 2>/dev/null || true

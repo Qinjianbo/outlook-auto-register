@@ -1,7 +1,10 @@
 #!/bin/bash
 # 在 zo2/zo3 上启用 Email-Register 守护（替换旧 outlook-auto-register 路径）
 set -euo pipefail
-ROOT="${EMAIL_REGISTER_ROOT:-/home/workspace/Email-Register}"
+# 项目根目录：优先用 EMAIL_REGISTER_ROOT，否则按脚本自身位置推导
+# （脚本在 <项目根>/deploy/ 下，往上一级就是项目根），不再写死路径。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="${EMAIL_REGISTER_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 NODE_ID="${OUTLOOK_REGISTRAR_NODE:-unknown}"
 USE_HUB="${USE_NGROK_HUB:-0}"
 if [[ "$USE_HUB" == "1" ]]; then

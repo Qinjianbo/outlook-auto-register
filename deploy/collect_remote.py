@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import json, sys, urllib.request
+import json, os, sys, urllib.request
 from pathlib import Path
-root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("/home/workspace/Email-Register")
+# 默认路径：命令行参数优先，其次 EMAIL_REGISTER_ROOT，最后按文件位置推导
+root = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(os.environ.get("EMAIL_REGISTER_ROOT", "")) or Path(__file__).resolve().parent.parent
 nid_path = root / "runtime_outlook/node_identity.json"
 nid = json.loads(nid_path.read_text())["node_id"] if nid_path.exists() else "unknown"
 out = {"node_id": nid, "collected_via": "ssh"}

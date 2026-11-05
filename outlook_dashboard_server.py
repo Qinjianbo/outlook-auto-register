@@ -161,7 +161,7 @@ def xray_test() -> dict:
 def airport_status():
     """机场代理状态"""
     import os, time
-    apt_file = '/home/ubuntu/Email-Register/runtime_outlook/airport_proxies.txt'
+    apt_file = str(ROOT / "runtime_outlook" / "airport_proxies.txt")
     proxies = []
     if os.path.exists(apt_file):
         with open(apt_file) as f:
@@ -240,18 +240,18 @@ def airport_fetch_and_import():
                 if len(working) >= 40: break
     
     # 4. 写入文件
-    apt_file = '/home/ubuntu/Email-Register/runtime_outlook/airport_proxies.txt'
+    apt_file = str(ROOT / "runtime_outlook" / "airport_proxies.txt")
     with open(apt_file, 'w') as f:
         for url, ip in working:
             f.write(f"{url}\n")
-    
-    # 5. 导入到Outlook系统
-    subprocess.run(['/home/ubuntu/email-register-venv/bin/python3',
-        '/home/ubuntu/Email-Register/outlook_launcher.py', 'import-proxies', apt_file, '--replace'],
+
+    # 5. 导入到Outlook系统（用当前面板进程的 Python，不再写死 venv 路径）
+    subprocess.run([sys.executable,
+        str(ROOT / "outlook_launcher.py"), 'import-proxies', apt_file, '--replace'],
         capture_output=True, timeout=10)
-    
+
     # 6. 清空被拉黑的节点(新代理来了旧黑名单作废)
-    with open('/home/ubuntu/Email-Register/runtime_outlook/blocked_nodes.json', 'w') as f:
+    with open(ROOT / "runtime_outlook" / "blocked_nodes.json", 'w') as f:
         f.write('{}')
     
     return {'total': total, 'verified': len(working), 'proxies': [{'url': u[:60], 'ip': ip} for u, ip in working[:10]]}
