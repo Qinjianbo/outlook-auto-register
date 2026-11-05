@@ -460,6 +460,10 @@ class CDPLaunchConfig:
     window_position: tuple[int, int] = (0, 0)  # 窗口左上角位置（并发时错开：0=0,50  1=400,50  2=800,50 ...）
     extra_args: list[str] = field(default_factory=list)
     extensions: list[str] = field(default_factory=list)
+    # 浏览器语言/时区（跟代理出口国家保持一致，避免 IP/语言/时区三处对不上）；
+    # 为空时不覆盖，沿用系统默认值。
+    locale: str = ""
+    timezone: str = ""
 
 
 class CDPBrowser:
@@ -486,6 +490,9 @@ class CDPBrowser:
         self._listen_thread: Any = None
         self._connected: bool = False
         self._temp_dir: str = ""
+        # 上次鼠标停留的视口坐标（模拟真人移动轨迹用）
+        self._mouse_x: float | None = None
+        self._mouse_y: float | None = None
 
     def launch(self) -> "CDPBrowser":
         """Launch browser and connect via CDP."""
@@ -760,6 +767,22 @@ class CDPBrowser:
 
         # Remove webdriver flag via CDP
         self._hide_automation()
+
+        # 语言/时区跟代理国家保持一致（config 里没配就不覆盖）
+        if getattr(self.config, "timezone", ""):
+            try:
+                self._send_cmd("Emulation.setTimezoneOverride",
+                               {"timezoneId": self.config.timezone})
+                logger.info("[CDP] Timezone override: %s", self.config.timezone)
+            except Exception as e:
+                logger.warning("[CDP] setTimezoneOverride failed: %s", e)
+        if getattr(self.config, "locale", ""):
+            try:
+                self._send_cmd("Emulation.setLocaleOverride",
+                               {"locale": self.config.locale})
+                logger.info("[CDP] Locale override: %s", self.config.locale)
+            except Exception as e:
+                logger.warning("[CDP] setLocaleOverride failed: %s", e)
 
         self._connected = True
         logger.info("[CDP] Browser launched and connected")
@@ -1121,6 +1144,18 @@ class CDPBrowser:
 
     def _hide_automation(self):
         """Remove automation markers via CDP — persistent across all navigations."""
+        # 语言跟 config.locale 保持一致（默认 en-US）；跟代理国家对不上
+        # （比如 IP 是日本、语言是美国英语）是风控喜欢抓的一类信号。
+        locale_languages = {
+            "ja-JP": ["ja-JP", "ja", "en-US", "en"],
+            "zh-TW": ["zh-TW", "zh", "en-US", "en"],
+            "zh-HK": ["zh-HK", "zh-TW", "zh", "en-US", "en"],
+            "en-SG": ["en-SG", "en-US", "en"],
+            "en-GB": ["en-GB", "en-US", "en"],
+            "ko-KR": ["ko-KR", "ko", "en-US", "en"],
+        }
+        langs = locale_languages.get(self.config.locale, ["en-US", "en"])
+        langs_js = "[" + ", ".join(f"'{lang}'" for lang in langs) + "]"
         # 核心隐身脚本 — 通过 addScriptToEvaluateOnNewDocument 在每个页面加载前注入
         stealth_js = r"""
         // ═══ 1. navigator.webdriver ═══
@@ -1235,7 +1270,10 @@ class CDPBrowser:
         Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
         Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
         """
-        
+        # 把上面写死的 en-US 语言列表换成跟 locale 一致的版本
+        stealth_js = stealth_js.replace("get: () => ['en-US', 'en'],",
+                                        f"get: () => {langs_js},")
+
         try:
             # 关键修复：使用 addScriptToEvaluateOnNewDocument 确保每次页面导航都注入隐身脚本
             self._send_cmd("Page.addScriptToEvaluateOnNewDocument", {"source": stealth_js})
@@ -1367,8 +1405,41 @@ class CDPBrowser:
             return False
         return rect["width"] > 0 and rect["height"] > 0
 
+    def mouse_move_to(self, x: float, y: float, duration_ms: int = 400):
+        """Move the mouse to (x, y) along a human-like eased path.
+
+        Real users never teleport the cursor: the pointer travels with
+        varying speed and slight jitter. A mousePressed with no preceding
+        mouseMoved is a strong automation tell, so every click in the
+        registration flow goes through this first.
+        """
+        import random
+        start_x = self._mouse_x
+        start_y = self._mouse_y
+        if start_x is None or start_y is None:
+            # 还不知道上次位置：从窗口内随机一点出发
+            w, h = self.config.window_size
+            start_x = random.uniform(w * 0.2, w * 0.8)
+            start_y = random.uniform(h * 0.2, h * 0.8)
+        steps = random.randint(12, 20)
+        for i in range(1, steps + 1):
+            t = i / steps
+            eased = 1.0 - (1.0 - t) ** 3  # ease-out: 先快后慢
+            cx = start_x + (x - start_x) * eased + random.uniform(-1.5, 1.5)
+            cy = start_y + (y - start_y) * eased + random.uniform(-1.0, 1.0)
+            self._send_cmd("Input.dispatchMouseEvent", {
+                "type": "mouseMoved",
+                "x": cx, "y": cy,
+                "button": "none",
+            })
+            time.sleep(duration_ms / steps / 1000.0 + random.uniform(-0.004, 0.008))
+        self._mouse_x, self._mouse_y = x, y
+
     def click_at(self, x: float, y: float, button: str = "left"):
-        """Click at screen coordinates using CDP Input.dispatchMouseEvent."""
+        """Click at viewport coordinates: move there first, then press/release."""
+        import random
+        self.mouse_move_to(x, y)
+        time.sleep(random.uniform(0.05, 0.15))
         # Mouse pressed
         self._send_cmd("Input.dispatchMouseEvent", {
             "type": "mousePressed",
@@ -1376,7 +1447,7 @@ class CDPBrowser:
             "button": button,
             "clickCount": 1,
         })
-        time.sleep(0.05 + __import__("random").uniform(0, 0.05))
+        time.sleep(random.uniform(0.06, 0.12))
         # Mouse released
         self._send_cmd("Input.dispatchMouseEvent", {
             "type": "mouseReleased",
@@ -1384,6 +1455,7 @@ class CDPBrowser:
             "button": button,
             "clickCount": 1,
         })
+        self._mouse_x, self._mouse_y = x, y
 
     def touch_tap(self, x: float, y: float):
         """Touch tap at coordinates (for CAPTCHA bypass)."""

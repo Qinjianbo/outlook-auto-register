@@ -475,9 +475,11 @@ def _retry_fetch_rt_with_fresh_browser(email: str, password: str, client_id: str
 
 
 def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_index: int = 0) -> dict:
+    proxy_country = ""
     if proxy:
         check = curl_check_proxy(proxy)
         if check.get("ok"):
+            proxy_country = check.get("country", "") or ""
             log.info("代理预检通过: %s %s %s", check.get("ip"), check.get("country"), proxy)
         else:
             raise RuntimeError(f"代理预检失败: {proxy} -> {check.get('error')}")
@@ -491,6 +493,8 @@ def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_
         extract_rt=extract_rt,
         keep_browser_open=False,
         slot_index=slot_index,
+        # 代理出口国家传给浏览器，让语言/时区跟代理保持一致
+        proxy_country=proxy_country,
     )
     record = {
         "ts": dt.datetime.now().isoformat(),

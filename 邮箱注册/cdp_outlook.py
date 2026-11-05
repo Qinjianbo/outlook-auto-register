@@ -492,7 +492,13 @@ def _find_first_visible(browser: CDPBrowser, selectors: list[str]) -> Tuple[dict
 
 def _type_into_element(browser: CDPBrowser, element_info: dict, text: str, clear_first: bool = True):
     selector = element_info["selector"]
-    browser.focus_element(selector)
+    # 先用真实鼠标点一下输入框再打字（真人就是这么填表的），
+    # 拿不到坐标时再退回 JS 聚焦。
+    rect = browser.get_element_rect_js(selector)
+    if rect and rect["width"] > 0 and rect["height"] > 0:
+        browser.click_at(rect["center_x"], rect["center_y"])
+    else:
+        browser.focus_element(selector)
     time.sleep(random.uniform(0.1, 0.3))
     if clear_first:
         escaped_sel = selector.replace("'", "\\'")
@@ -510,11 +516,16 @@ def _type_into_element(browser: CDPBrowser, element_info: dict, text: str, clear
 def _select_dropdown(browser: CDPBrowser, selector: str, visible_text: str):
     escaped_sel = selector.replace("'", "\\'")
     lower_text = visible_text.lower()
-    js = f"""
-    (() => {{
-        const el = document.querySelector('{escaped_sel}');
-        if (!el) return false;
-        if (el.tagName === 'SELECT') {{
+    # 原生 <select> 没法用鼠标点选项：直接用 JS 设值
+    is_native = browser.evaluate(f"""
+        (() => {{ const el = document.querySelector('{escaped_sel}');
+                 return el ? el.tagName === 'SELECT' : false; }})()
+    """)
+    if is_native:
+        js = f"""
+        (() => {{
+            const el = document.querySelector('{escaped_sel}');
+            if (!el) return false;
             for (let i = 0; i < el.options.length; i++) {{
                 if (el.options[i].text.trim().toLowerCase() === '{lower_text}') {{
                     el.selectedIndex = i;
@@ -523,14 +534,47 @@ def _select_dropdown(browser: CDPBrowser, selector: str, visible_text: str):
                 }}
             }}
             return false;
+        }})()
+        """
+        browser.evaluate(js)
+        time.sleep(random.uniform(0.3, 0.5))
+        return
+    # 自定义下拉框：先用真实鼠标点开（拿不到坐标时退回 JS 点击）
+    rect = browser.get_element_rect_js(selector)
+    if rect and rect["width"] > 0 and rect["height"] > 0:
+        browser.click_at(rect["center_x"], rect["center_y"])
+    else:
+        browser.evaluate(f"""
+            (() => {{ const el = document.querySelector('{escaped_sel}');
+                     if (el) el.click(); return true; }})()
+        """)
+    time.sleep(random.uniform(0.3, 0.6))
+    # 再用真实鼠标点选项（拿不到坐标时退回 JS 点击）
+    option_js = f"""
+    (() => {{
+        const options = document.querySelectorAll('[role="option"], option, li, [data-value]');
+        for (const opt of options) {{
+            const text = (opt.textContent || opt.innerText || '').trim().toLowerCase();
+            if (text === '{lower_text}' || text.includes('{lower_text}')) {{
+                if (opt.offsetParent !== null) {{
+                    const r = opt.getBoundingClientRect();
+                    return JSON.stringify({{x: r.x + r.width / 2, y: r.y + r.height / 2}});
+                }}
+            }}
         }}
-        el.click();
-        return true;
+        return null;
     }})()
     """
-    browser.evaluate(js)
-    time.sleep(random.uniform(0.3, 0.6))
-    option_js = f"""
+    pos = browser.evaluate(option_js)
+    if pos:
+        try:
+            data = json.loads(pos) if isinstance(pos, str) else pos
+            browser.click_at(data["x"], data["y"])
+            time.sleep(random.uniform(0.3, 0.5))
+            return
+        except Exception:
+            pass
+    browser.evaluate(f"""
     (() => {{
         const options = document.querySelectorAll('[role="option"], option, li, [data-value]');
         for (const opt of options) {{
@@ -541,8 +585,7 @@ def _select_dropdown(browser: CDPBrowser, selector: str, visible_text: str):
         }}
         return false;
     }})()
-    """
-    browser.evaluate(option_js)
+    """)
     time.sleep(random.uniform(0.3, 0.5))
 
 
@@ -2073,7 +2116,17 @@ def _click_fluent_dropdown_option(browser: CDPBrowser, button_id: str, name_hint
 
 
 def _click_next(browser: CDPBrowser):
-    # \u65b9\u6cd51: JavaScript \u76f4\u63a5\u70b9\u51fb\uff08\u5bf9 React \u5e94\u7528\u66f4\u53ef\u9760\uff09
+    # 方式1: 真实鼠标点击（先移过去再按下去，产生完整的鼠标事件链）。
+    # 之前是 JS 直接点击，整张表单没有任何鼠标事件，很容易被
+    # 人机检测当成自动化。拿不到坐标时再退回 JS 点击。
+    for selector in ['#nextButton', 'button[type="submit"]', '#idSIButton9', 'button[data-testid="primaryButton"]']:
+        rect = browser.get_element_rect_js(selector)
+        if rect and rect["width"] > 0 and rect["height"] > 0:
+            browser.click_at(rect["center_x"], rect["center_y"])
+            logger.info("[CLICK] Next button via mouse: %s", selector)
+            return
+
+    # 方式2: JavaScript 直接点击（对 React 应用更可靠）
     result = browser.evaluate("""(() => {
         // \u4f18\u5148\u6309 selector \u627e
         const selectors = ['#nextButton', 'button[type="submit"]', '#idSIButton9', 'button[data-testid="primaryButton"]'];
@@ -2101,7 +2154,7 @@ def _click_next(browser: CDPBrowser):
         logger.info("[CLICK] Next button via JS: %s", result)
         return
 
-    # \u65b9\u6cd52: CDP \u9f20\u6807\u4e8b\u4ef6\uff08\u540e\u5907\uff09
+    # 方式3: CDP 鼠标事件（后备）
     for selector in FIELD_SELECTORS["submit"]:
         try:
             nid = browser.query_selector(selector)
@@ -3341,6 +3394,18 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
         logger.warning("[RT] refresh_token 获取失败: %s", e)
         return ""
 
+# 代理出口国家 -> 浏览器语言/时区（跟代理保持一致，避免 IP/语言/时区三处对不上）
+COUNTRY_LOCALE = {
+    "JP": ("ja-JP", "Asia/Tokyo"),
+    "TW": ("zh-TW", "Asia/Taipei"),
+    "HK": ("zh-HK", "Asia/Hong_Kong"),
+    "SG": ("en-SG", "Asia/Singapore"),
+    "US": ("en-US", "America/New_York"),
+    "GB": ("en-GB", "Europe/London"),
+    "KR": ("ko-KR", "Asia/Seoul"),
+}
+
+
 def register_outlook_account(
     account: OutlookAccount | None = None,
     chrome_path: str = "",
@@ -3354,6 +3419,7 @@ def register_outlook_account(
     extract_rt: bool = False,  # 注册成功后自动在同一浏览器获取 refresh_token
     pause_checker=None,  # 暂停检查回调: pause_checker(step_name) -> bool(stop)
     slot_index: int = 0,  # 并发槽位索引（0-based），用于计算窗口偏移位置
+    proxy_country: str = "",  # 代理出口国家代码（如 JP），用于设置浏览器语言/时区
 ) -> RegistrationResult:
     """
     Register an Outlook account using the CDP hybrid approach.
@@ -3388,19 +3454,27 @@ def register_outlook_account(
     )
 
     # ── 并发窗口偏移: 每个槽位错开窗口位置，避免重叠 ──
-    # 2列布局: slot 0 -> (0, 0), slot 1 -> (640, 0), slot 2 -> (0, 500), slot 3 -> (640, 500)
-    win_w, win_h = 640, 450  # 每个窗口的大小（小于 screen_size 以容纳多个）
+    # 正常桌面尺寸 1280x720（Xvfb 屏幕 1366x768 能放下）；
+    # 之前 640x450 太小，容易被当成自动化/无头环境的特征。单线程部署只用 slot 0。
+    win_w, win_h = 1280, 720
     col = slot_index % 2
     row = slot_index // 2
     win_x = col * (win_w + 20)
     win_y = row * (win_h + 40) + 40  # 顶部留 40px 给任务栏
     logger.info("[CDP_REG] Slot %d: window at (%d, %d) size %dx%d", slot_index, win_x, win_y, win_w, win_h)
 
+    # 浏览器语言/时区跟代理出口国家保持一致（不知道国家时不覆盖）
+    locale, timezone = COUNTRY_LOCALE.get((proxy_country or "").upper(), ("", ""))
+    if locale:
+        logger.info("[CDP_REG] Browser locale/timezone: %s / %s (proxy country %s)",
+                    locale, timezone, proxy_country)
+
     config = CDPLaunchConfig(
         chrome_path=chrome_path, browser_type=browser_type,
         proxy=proxy_url, proxy_auth_url=proxy_auth_url, headless=headless,
         extensions=[extension_path] if extension_path else [],
         window_size=(win_w, win_h), window_position=(win_x, win_y),
+        locale=locale, timezone=timezone,
     )
 
     browser = None
