@@ -245,9 +245,14 @@ class ProxyRotator:
                 log.warning("mihomo 节点快照失败: %s", e)
         seen = set()
         self.nodes = [n for n in nodes if n and not (n in seen or seen.add(n))]
-        # 节点优先级排序：台湾/日本 > AWS > 其他（基于实际成功率：TW/JP 100%, AWS 100%, DO 25%）
+        # 节点优先级排序：住宅代理 > 台湾/日本 > AWS > 其他
+        # （住宅代理是面板里激活的那条，名字里没有国家标记，
+        # 不单独给最高优先级会被排到所有订阅节点后面，等于白加。
+        # 基于实际成功率：TW/JP 100%, AWS 100%, DO 25%）
         def _priority(name):
             n = name.lower()
+            if "住宅" in n:
+                return -1
             if any(k in n for k in ["台湾", "台灣", "tw", "japan", "日本", "jp"]):
                 return 0
             if any(k in n for k in ["aws", "amazon"]):
