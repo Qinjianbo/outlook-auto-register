@@ -474,7 +474,13 @@ def _retry_fetch_rt_with_fresh_browser(email: str, password: str, client_id: str
             pass
 
 
-def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_index: int = 0) -> dict:
+# hsprotect 进度桥插件（只读进度，不碰代理、不改页面）：注册时加载，
+# 让自动长按能按进度松手，而不是固定时长盲按。目录不存在时不加载。
+HS_PROGRESS_EXTENSION = Path(__file__).resolve().parent / "browser_extension" / "hsprotect-progress"
+
+
+def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_index: int = 0,
+             profile_key: str = "") -> dict:
     proxy_country = ""
     if proxy:
         check = curl_check_proxy(proxy)
@@ -486,6 +492,8 @@ def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_
     else:
         log.warning("本次注册未使用代理")
 
+    extension_path = str(HS_PROGRESS_EXTENSION) if HS_PROGRESS_EXTENSION.is_dir() else ""
+
     result = register_outlook_account(
         browser_type=browser,
         proxy=proxy or "",
@@ -495,6 +503,9 @@ def run_once(proxy: str, browser: str = "chrome", extract_rt: bool = True, slot_
         slot_index=slot_index,
         # 代理出口国家传给浏览器，让语言/时区跟代理保持一致
         proxy_country=proxy_country,
+        # 固定浏览器档案按节点区分；验证码进度桥插件随浏览器一起加载
+        profile_key=profile_key,
+        extension_path=extension_path,
     )
     record = {
         "ts": dt.datetime.now().isoformat(),
@@ -540,7 +551,9 @@ def _register_one(idx: int, count: int, proxy: str, rotator: ProxyRotator, brows
     for attempt in range(1, max_proxy_attempts + 1):
         try:
             log.info("[T%d] 开始第 %d/%d 个注册，尝试 %d/%d，proxy=%s", idx, idx + 1, count, attempt, max_proxy_attempts, proxy or "none")
-            record = run_once(proxy, browser=browser, extract_rt=False, slot_index=idx)
+            record = run_once(proxy, browser=browser, extract_rt=False, slot_index=idx,
+                            # 固定浏览器档案按当前节点区分（节点名含 emoji，内部会取 hash 当目录名）
+                            profile_key=rotator.current_node or "")
             result = record
             recorded = True
             if record.get("success"):

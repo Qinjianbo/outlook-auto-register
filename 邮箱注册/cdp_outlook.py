@@ -432,7 +432,14 @@ def _random_account(domain: str = "outlook.com", provider: str = "outlook") -> O
     first_lower = first.lower()
     last_lower = last.lower()
     style = random.randint(0, 4)
-    suffix = ''.join(random.choices("abcdefghijklmnopqrstuvwxyz0123456789", k=random.randint(12, 16)))
+    # 真人起用户名很少拖十几位随机字符：改成短后缀（2-4 位数字 / 年份后两位 / 2 字母+2 数字）
+    suffix_style = random.randint(0, 2)
+    if suffix_style == 0:
+        suffix = ''.join(random.choices("0123456789", k=random.randint(2, 4)))
+    elif suffix_style == 1:
+        suffix = str(random.randint(70, 99))
+    else:
+        suffix = ''.join(random.choices("abcdefghijklmnopqrstuvwxyz", k=2)) + ''.join(random.choices("0123456789", k=2))
 
     chunks = [
         f"{first_lower[:random.randint(3, min(7, len(first_lower)))]}{last_lower[:random.randint(2, min(6, len(last_lower)))]}",
@@ -510,7 +517,8 @@ def _type_into_element(browser: CDPBrowser, element_info: dict, text: str, clear
         """)
         time.sleep(random.uniform(0.1, 0.2))
     browser.type_text(text, delay_ms=random.randint(50, 120))
-    time.sleep(random.uniform(0.2, 0.5))
+    # 打完一个字段停一下（真人填完会看一眼再往下填）
+    time.sleep(random.uniform(0.3, 0.8))
 
 
 def _select_dropdown(browser: CDPBrowser, selector: str, visible_text: str):
@@ -1022,48 +1030,106 @@ def _locate_hsprotect_challenge(browser: CDPBrowser) -> dict | None:
 
 def _hsprotect_press_hold(browser: CDPBrowser, info: dict, attempt: int) -> bool:
     """
-    Handle press-and-hold challenge.
-    
-    Strategy (from outlook-register's proven approach):
-    1. First attempt: CDP touch long-press with pointerType="touch" for 8 seconds
-    2. Second attempt: Same but 10 seconds (longer hold)
-    3. Third attempt: OS-level long-press as fallback
-    
-    Key insight: Clean press without tremor/micro-movements works best.
-    hspress/PerimeterX expects a clean, steady touch.
+    Handle press-and-hold challenge with closed-loop release timing.
+
+    The press itself stays clean and steady (hsprotect expects that).
+    What changed: instead of blindly holding a fixed 8/10/12s, we watch the
+    progress reported by the hsprotect-progress extension (it reads the ring
+    from inside the iframe and exposes it on <html> data attributes) and
+    release when the ring is (almost) full. If the bridge is not loaded or
+    the ring gives no readable signal, fall back to the old fixed durations.
     """
     btn_x = info.get("x", 0)
     btn_y = info.get("y", 0)
     logger.info("[CAPTCHA] Press-and-hold at (%.0f, %.0f) attempt=%d", btn_x, btn_y, attempt)
-    
-    if attempt == 1:
-        # First try: 8-second clean touch press (proven approach)
-        logger.info("[CAPTCHA] Strategy A: CDP touch long-press 8s (pointerType=touch)")
-        try:
-            _cdp_touch_long_press(browser, btn_x, btn_y, duration=8.0)
-            return True
-        except Exception as e:
-            logger.warning("[CAPTCHA] Strategy A failed: %s", e)
-    elif attempt == 2:
-        # Second try: longer hold (10 seconds)
-        logger.info("[CAPTCHA] Strategy B: CDP touch long-press 10s")
-        try:
-            _cdp_touch_long_press(browser, btn_x, btn_y, duration=10.0)
-            return True
-        except Exception as e:
-            logger.warning("[CAPTCHA] Strategy B failed: %s", e)
-    else:
-        # 3rd+: longer CDP press (no OS-level fallback - clicks wrong window)
-        duration = 12.0 + (attempt - 3) * 2.0
-        logger.info("[CAPTCHA] Strategy C: CDP touch long-press %.0fs", duration)
-        try:
-            _cdp_touch_long_press(browser, btn_x, btn_y, duration=duration)
-            return True
-        except Exception as e:
-            logger.warning("[CAPTCHA] Strategy C failed: %s", e)
-    
-    return False
 
+    # 盲按时的固定时长（桥没接通时用，和原来一致）
+    if attempt == 1:
+        base_duration = 8.0
+    elif attempt == 2:
+        base_duration = 10.0
+    else:
+        base_duration = 12.0 + (attempt - 3) * 2.0
+
+    # 坐标夹在视口内
+    try:
+        viewport = browser.evaluate("JSON.stringify({w: window.innerWidth, h: window.innerHeight})")
+        if viewport:
+            vp = json.loads(viewport) if isinstance(viewport, str) else viewport
+            vw, vh = vp.get("w", 1280), vp.get("h", 900)
+            btn_x = max(10, min(btn_x, vw - 10))
+            btn_y = max(10, min(btn_y, vh - 10))
+    except Exception:
+        pass
+
+    def _read_progress():
+        try:
+            v = browser.evaluate("document.documentElement.getAttribute('data-hsprotect-progress')")
+            if v is None:
+                return None
+            return float(v)
+        except Exception:
+            return None
+
+    def _read_cleared():
+        try:
+            return browser.evaluate("document.documentElement.getAttribute('data-hsprotect-cleared')") == '1'
+        except Exception:
+            return False
+
+    # 像人一样先把手指移过去再按
+    try:
+        browser.mouse_move_to(btn_x, btn_y)
+    except Exception:
+        browser._send_cmd("Input.dispatchMouseEvent", {
+            "type": "mouseMoved", "x": btn_x, "y": btn_y,
+            "button": "none", "clickCount": 0,
+        })
+    time.sleep(random.uniform(0.2, 0.5))
+
+    # 按下（pointerType=touch，和原来一致）
+    try:
+        browser._send_cmd("Input.dispatchMouseEvent", {
+            "type": "mousePressed", "x": btn_x, "y": btn_y,
+            "button": "left", "clickCount": 1,
+            "pointerType": "touch",
+        })
+    except Exception as e:
+        logger.warning("[CAPTCHA] Press failed: %s", e)
+        return False
+
+    pressed_at = time.monotonic()
+    max_hold = 16.0
+    saw_marker = False
+    released_by = "timeout"
+    try:
+        while time.monotonic() - pressed_at < max_hold:
+            time.sleep(0.25)
+            if _read_cleared():
+                released_by = "cleared"
+                break
+            p = _read_progress()
+            if p is not None:
+                saw_marker = True
+                if p >= 0.97:
+                    released_by = f"progress={p:.2f}"
+                    break
+            elif not saw_marker and time.monotonic() - pressed_at >= base_duration:
+                # 桥没接通：按原来的固定时长盲按
+                released_by = f"blind-{base_duration:.0f}s"
+                break
+    finally:
+        try:
+            browser._send_cmd("Input.dispatchMouseEvent", {
+                "type": "mouseReleased", "x": btn_x, "y": btn_y,
+                "button": "left", "clickCount": 1,
+                "pointerType": "touch",
+            })
+        except Exception as e:
+            logger.warning("[CAPTCHA] Release failed: %s", e)
+    logger.info("[CAPTCHA] Press-and-hold released (%s, held %.1fs)",
+                released_by, time.monotonic() - pressed_at)
+    return True
 
 def _cdp_touch_long_press(browser: CDPBrowser, x: float, y: float, duration: float = 8.0):
     """
@@ -2116,6 +2182,8 @@ def _click_fluent_dropdown_option(browser: CDPBrowser, button_id: str, name_hint
 
 
 def _click_next(browser: CDPBrowser):
+    # 真人点下一步之前会停一下读页面，别一填完立刻点
+    time.sleep(random.uniform(0.8, 2.0))
     # 方式1: 真实鼠标点击（先移过去再按下去，产生完整的鼠标事件链）。
     # 之前是 JS 直接点击，整张表单没有任何鼠标事件，很容易被
     # 人机检测当成自动化。拿不到坐标时再退回 JS 点击。
@@ -3394,6 +3462,14 @@ def _extract_refresh_token(browser, email, client_id="14d82eec-204b-4c2f-b7e8-29
         logger.warning("[RT] refresh_token 获取失败: %s", e)
         return ""
 
+def _profile_dir_for_key(profile_key: str) -> str:
+    """固定浏览器档案目录（按节点区分；节点名含 emoji 等字符，取 sha1 前 12 位当目录名）。"""
+    import hashlib as _hashlib
+    safe = _hashlib.sha1(profile_key.encode("utf-8")).hexdigest()[:12]
+    return str(Path(__file__).resolve().parent.parent
+               / "runtime_outlook" / "browser_profiles" / safe)
+
+
 # 代理出口国家 -> 浏览器语言/时区（跟代理保持一致，避免 IP/语言/时区三处对不上）
 COUNTRY_LOCALE = {
     "JP": ("ja-JP", "Asia/Tokyo"),
@@ -3420,6 +3496,7 @@ def register_outlook_account(
     pause_checker=None,  # 暂停检查回调: pause_checker(step_name) -> bool(stop)
     slot_index: int = 0,  # 并发槽位索引（0-based），用于计算窗口偏移位置
     proxy_country: str = "",  # 代理出口国家代码（如 JP），用于设置浏览器语言/时区
+    profile_key: str = "",  # 固定浏览器档案的 key（一般是节点名），为空则用临时档案
 ) -> RegistrationResult:
     """
     Register an Outlook account using the CDP hybrid approach.
@@ -3469,12 +3546,20 @@ def register_outlook_account(
         logger.info("[CDP_REG] Browser locale/timezone: %s / %s (proxy country %s)",
                     locale, timezone, proxy_country)
 
+    # 固定浏览器档案（按节点区分）：留 Cookie 和历史，别每次都是全新浏览器。
+    # 无痕只在临时档案时开；固定档案时关掉，否则会话 Cookie 留不下来。
+    # 目录在 runtime_outlook 下（运行态，不进 git）。
+    profile_dir = _profile_dir_for_key(profile_key) if profile_key else ""
+    if profile_dir:
+        logger.info("[CDP_REG] Browser profile: %s (node %s)", profile_dir, profile_key)
+
     config = CDPLaunchConfig(
         chrome_path=chrome_path, browser_type=browser_type,
         proxy=proxy_url, proxy_auth_url=proxy_auth_url, headless=headless,
         extensions=[extension_path] if extension_path else [],
         window_size=(win_w, win_h), window_position=(win_x, win_y),
         locale=locale, timezone=timezone,
+        user_data_dir=profile_dir,
     )
 
     browser = None
@@ -3492,6 +3577,13 @@ def register_outlook_account(
 
         if pause_checker:
             if pause_checker("navigate"): result.error = "stopped"; return result
+        # 先经过 Outlook 官网再进注册页：真人一般是从官网点「创建帐户」进来的，
+        # 直接跳注册页没有 referer。官网打不开也不影响，继续走注册页。
+        try:
+            browser.navigate("https://outlook.live.com/", wait_for_load=True, timeout=20)
+            time.sleep(random.uniform(2.0, 4.0))
+        except Exception as e:
+            logger.info("[CDP_REG] Entry page outlook.live.com failed (%s), going to signup directly", e)
         browser.navigate(SIGNUP_URL, wait_for_load=True, timeout=25)
 
         # Wait for SPA to render — detect page readiness ASAP instead of fixed sleep

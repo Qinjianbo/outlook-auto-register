@@ -446,6 +446,16 @@ def _get_page_ws_url(port: int) -> str:
     return ""
 
 
+def _windows_ua_from_linux_ua(linux_ua: str) -> str | None:
+    """把 Linux 版 Chrome 的 UA 改成对应的 Windows 版（版本号保持一致）。"""
+    if not linux_ua or "Linux" not in linux_ua:
+        return None
+    win_ua = linux_ua.replace("X11; Linux x86_64", "Windows NT 10.0; Win64; x64")
+    if win_ua == linux_ua:
+        return None
+    return win_ua
+
+
 @dataclass
 class CDPLaunchConfig:
     """Configuration for launching Chrome/Chromium browser with CDP."""
@@ -560,7 +570,6 @@ class CDPBrowser:
             "--remote-allow-origins=*",
             f"--window-size={self.config.window_size[0]},{self.config.window_size[1]}",
             f"--window-position={self.config.window_position[0]},{self.config.window_position[1]}",
-            "--incognito",
             # 稳定性增强标志
             "--disable-gpu",
             "--disable-software-rasterizer",
@@ -581,7 +590,16 @@ class CDPBrowser:
             "--disable-sync",
             "--disable-client-side-phishing-detection",
             "--no-pings",
+            # WebRTC 会绕过代理泄露本机真实 IP（服务器是美国机房 IP，
+            # 而 HTTP 走日本代理，两边一对不上就等于自曝在用代理）。
+            # 只允许走代理的 WebRTC 路由，堵住直连泄露。
+            "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
         ]
+
+        # 无痕只用在临时档案上：固定档案要留 Cookie 和历史（装得像常用浏览器），
+        # 无痕会把会话 Cookie 丢掉，固定档案就白建了。
+        if not self.config.user_data_dir:
+            args.append("--incognito")
 
         if self.config.headless:
             args.append("--headless=new")
@@ -783,6 +801,38 @@ class CDPBrowser:
                 logger.info("[CDP] Locale override: %s", self.config.locale)
             except Exception as e:
                 logger.warning("[CDP] setLocaleOverride failed: %s", e)
+
+        # UA/平台伪装成 Windows 桌面（和 stealth 脚本里的 navigator.platform 一致）；
+        # 版本号取自本机 Chrome 真实版本，避免 UA 和浏览器版本对不上。
+        try:
+            version_info = self._send_cmd("Browser.getVersion", {})
+            linux_ua = (version_info or {}).get("userAgent", "") if isinstance(version_info, dict) else ""
+            win_ua = _windows_ua_from_linux_ua(linux_ua)
+            if win_ua:
+                import re as _re
+                _m = _re.search(r"Chrome/(\d+)", win_ua)
+                major = _m.group(1) if _m else ""
+                brands = [
+                    {"brand": "Chromium", "version": major},
+                    {"brand": "Google Chrome", "version": major},
+                    {"brand": "Not-A.Brand", "version": "99"},
+                ]
+                self._send_cmd("Emulation.setUserAgentOverride", {
+                    "userAgent": win_ua,
+                    "platform": "Win32",
+                    "userAgentMetadata": {
+                        "brands": brands,
+                        "fullVersionList": brands,
+                        "platform": "Windows",
+                        "platformVersion": "15.0.0",
+                        "architecture": "x86",
+                        "model": "",
+                        "mobile": False,
+                    },
+                })
+                logger.info("[CDP] User-Agent override: Windows desktop (Chrome %s)", major)
+        except Exception as e:
+            logger.warning("[CDP] User-Agent override failed: %s", e)
 
         self._connected = True
         logger.info("[CDP] Browser launched and connected")
@@ -1158,10 +1208,21 @@ class CDPBrowser:
         langs_js = "[" + ", ".join(f"'{lang}'" for lang in langs) + "]"
         # 核心隐身脚本 — 通过 addScriptToEvaluateOnNewDocument 在每个页面加载前注入
         stealth_js = r"""
+        // 补丁函数伪装：让 toString 看起来像原生函数。
+        // 不加这个，一查 Function.prototype.toString 就知道这些函数被改过。
+        function __maskNative(fn, name) {
+            try {
+                Object.defineProperty(fn, 'toString', {
+                    value: function() { return 'function ' + name + '() { [native code] }'; },
+                    configurable: true,
+                });
+            } catch (e) {}
+        }
+
         // ═══ 1. navigator.webdriver ═══
-        Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-        // 双重保护：覆盖 prototype
-        delete Navigator.prototype.webdriver;
+        // 真浏览器里这个值是 false；之前返回 undefined、还删 prototype，
+        // 反而显得不对劲。
+        Object.defineProperty(navigator, 'webdriver', {get: () => false});
         
         // ═══ 2. Chrome runtime (Microsoft 检测重点) ═══
         window.chrome = window.chrome || {};
@@ -1190,6 +1251,7 @@ class CDPBrowser:
                 Promise.resolve({ state: Notification.permission }) :
                 originalQuery(parameters)
         );
+        __maskNative(window.navigator.permissions.query, 'query');
         
         // ═══ 4. Plugins (真实 Chrome 有 5 个默认插件) ═══
         Object.defineProperty(navigator, 'plugins', {
@@ -1222,6 +1284,7 @@ class CDPBrowser:
             if (param === 37446) return 'Intel Iris OpenGL Engine'; // UNMASKED_RENDERER_WEBGL
             return getParameterOrig.call(this, param);
         };
+        __maskNative(WebGLRenderingContext.prototype.getParameter, 'getParameter');
         if (typeof WebGL2RenderingContext !== 'undefined') {
             const getParameter2Orig = WebGL2RenderingContext.prototype.getParameter;
             WebGL2RenderingContext.prototype.getParameter = function(param) {
@@ -1229,6 +1292,7 @@ class CDPBrowser:
                 if (param === 37446) return 'Intel Iris OpenGL Engine';
                 return getParameter2Orig.call(this, param);
             };
+            __maskNative(WebGL2RenderingContext.prototype.getParameter, 'getParameter');
         }
         
         // ═══ 7. Canvas fingerprint 微扰 ═══
@@ -1245,7 +1309,8 @@ class CDPBrowser:
             }
             return origToDataURL.apply(this, arguments);
         };
-        
+        __maskNative(HTMLCanvasElement.prototype.toDataURL, 'toDataURL');
+
         // ═══ 8. 隐藏自动化特征 ═══
         // 移除 $cdc_ (ChromeDriver 标记)
         if (document.querySelector) {
@@ -1269,6 +1334,35 @@ class CDPBrowser:
         Object.defineProperty(navigator, 'hardwareConcurrency', {get: () => 8});
         Object.defineProperty(navigator, 'deviceMemory', {get: () => 8});
         Object.defineProperty(navigator, 'maxTouchPoints', {get: () => 0});
+
+        // ═══ 11. 平台：报成 Windows 桌面（服务器是 Linux，真人一般是 Win/Mac）═══
+        // 和下面的 UA 覆盖（CDP Emulation.setUserAgentOverride）保持一致。
+        Object.defineProperty(navigator, 'platform', {get: () => 'Win32'});
+
+        // ═══ 12. WebRTC：不让页面通过 ICE 拿到本机真实 IP ═══
+        // 启动参数已经强制 WebRTC 只走代理路由，这里再把 RTCPeerConnection
+        // 换成不收集候选地址的空壳，双保险。注册流程用不到 WebRTC。
+        window.RTCPeerConnection = function() {
+            return {
+                createOffer: () => Promise.resolve({}),
+                createAnswer: () => Promise.resolve({}),
+                setLocalDescription: () => Promise.resolve(),
+                setRemoteDescription: () => Promise.resolve(),
+                addIceCandidate: () => Promise.resolve(),
+                addEventListener: () => {},
+                removeEventListener: () => {},
+                close: () => {},
+                get iceGatheringState() { return 'complete'; },
+                get signalingState() { return 'stable'; },
+                get connectionState() { return 'connected'; },
+                onicecandidate: null,
+            };
+        };
+        __maskNative(window.RTCPeerConnection, 'RTCPeerConnection');
+        if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+            navigator.mediaDevices.getUserMedia = () => Promise.reject(new DOMException('Permission denied', 'NotAllowedError'));
+            __maskNative(navigator.mediaDevices.getUserMedia, 'getUserMedia');
+        }
         """
         # 把上面写死的 en-US 语言列表换成跟 locale 一致的版本
         stealth_js = stealth_js.replace("get: () => ['en-US', 'en'],",
