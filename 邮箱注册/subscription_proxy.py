@@ -240,6 +240,61 @@ def _api_put(path: str, data: dict, timeout: float = 5) -> bool:
     return False
 
 
+# ─── 住宅代理（面板 🏠 住宅代理里激活的那条）───
+# 面板把住宅代理存在这里，激活的那条在每次生成 mihomo 配置时排在最前面，
+# 注册轮换会第一个试它；刷新订阅重新生成配置时也会重新加上，不会被刷掉。
+RESIDENTIAL_FILE = MIHOMO_DIR / "residential_proxies.json"
+RESIDENTIAL_NAME = "🏠 住宅代理"
+
+
+def _parse_residential_url(proxy_str: str) -> dict | None:
+    """把 http://user:pass@host:port 或 socks5://... 解析成 mihomo 节点。"""
+    import urllib.parse
+
+    try:
+        u = urllib.parse.urlparse((proxy_str or "").strip())
+    except Exception:
+        return None
+    scheme = (u.scheme or "http").lower()
+    if scheme in ("http", "https"):
+        ptype = "http"
+    elif scheme in ("socks5", "socks5h"):
+        ptype = "socks5"
+    else:
+        return None
+    if not u.hostname or not u.port:
+        return None
+    entry: dict = {
+        "name": RESIDENTIAL_NAME,
+        "type": ptype,
+        "server": u.hostname,
+        "port": u.port,
+    }
+    if u.username:
+        entry["username"] = urllib.parse.unquote(u.username)
+    if u.password:
+        entry["password"] = urllib.parse.unquote(u.password)
+    return entry
+
+
+def _active_residential_proxy() -> dict | None:
+    """返回当前激活的住宅代理对应的 mihomo 节点，没有激活或格式不对时返回 None。"""
+    try:
+        if not RESIDENTIAL_FILE.exists():
+            return None
+        data = json.loads(RESIDENTIAL_FILE.read_text(encoding="utf-8"))
+        for p in data if isinstance(data, list) else []:
+            if isinstance(p, dict) and p.get("active") and p.get("proxy"):
+                entry = _parse_residential_url(p["proxy"])
+                if entry:
+                    return entry
+                logger.warning("[mihomo] 住宅代理格式无法解析，已跳过: %s", p.get("name", ""))
+        return None
+    except Exception as e:
+        logger.warning(f"[mihomo] 读取住宅代理失败: {e}")
+        return None
+
+
 # ─── 核心管理器 ───
 
 class SubscriptionProxyManager:
@@ -425,6 +480,16 @@ class SubscriptionProxyManager:
                                     logger.warning(f"[mihomo] provider {pname} 获取失败: {pe}")
                 except Exception as e:
                     logger.warning(f"[mihomo] 订阅 {i} 下载失败: {e}")
+
+            # 住宅代理（面板里激活的那条）：排在最前面，注册轮换优先试它。
+            # 放在订阅节点之后、空检查之前，这样即使订阅暂时拉不到，
+            # 只要住宅代理在也能生成一份可用配置。
+            res_proxy = _active_residential_proxy()
+            if res_proxy:
+                all_proxies = [res_proxy] + [
+                    p for p in all_proxies if p.get("name") != res_proxy["name"]
+                ]
+                logger.info(f"[mihomo] 已加入激活的住宅代理: {res_proxy['name']}")
 
             if not all_proxies:
                 logger.error("[mihomo] 没有获取到任何代理节点")

@@ -623,18 +623,77 @@ def residential_add(proxy_str: str, name: str = "") -> dict:
 
 
 def residential_remove(proxy_str: str) -> dict:
-    """移除住宅代理"""
+    """移除住宅代理；删掉的如果是正在使用的那条，顺带从 mihomo 配置里去掉"""
     proxies = _load_residential()
+    was_active = any(p["proxy"] == proxy_str and p.get("active") for p in proxies)
     before = len(proxies)
     proxies = [p for p in proxies if p["proxy"] != proxy_str]
     if len(proxies) < before:
         _save_residential(proxies)
+        if was_active:
+            result = _drop_residential_from_mihomo()
+            return {"ok": True, "msg": f"已移除住宅代理，{result['msg']}"}
         return {"ok": True, "msg": "已移除住宅代理"}
     return {"ok": False, "msg": "未找到该代理"}
 
 
+# mihomo 配置里住宅代理节点的固定名字，与 邮箱注册/subscription_proxy.py
+# 里的 RESIDENTIAL_NAME 保持一致，改名时两边要一起改。
+RESIDENTIAL_NODE_NAME = "🏠 住宅代理"
+
+
+def _regenerate_mihomo_config() -> bool:
+    """让管理器按当前订阅 + 已激活的住宅代理重新生成 mihomo 配置。"""
+    code, out, err = _run(
+        [sys.executable, "-c",
+         "import sys; sys.path.insert(0, '邮箱注册'); "
+         "from subscription_proxy import get_manager; "
+         "print(get_manager()._update_config())"],
+        timeout=120,
+    )
+    return code == 0 and "True" in out
+
+
+def _apply_residential_to_mihomo() -> dict:
+    """把当前激活的住宅代理写进 mihomo 配置、切过去并验证出口。
+
+    mihomo 未运行时只写配置，刷新代理启动 mihomo 后即生效
+    （刷新时配置会重新生成，住宅代理会保留，不会被刷掉）。
+    """
+    if not _regenerate_mihomo_config():
+        return {"ok": False, "msg": "重新生成 mihomo 配置失败，请稍后重试"}
+    # 无论 mihomo 是否在运行，都先确认住宅代理确实写进了配置
+    # （地址格式不对时管理器会跳过它，这里就能发现）
+    try:
+        import yaml
+        cfg = yaml.safe_load((MIHOMO_DIR / "config.yaml").read_text(encoding="utf-8"))
+        names = [p.get("name") for p in (cfg or {}).get("proxies", [])]
+    except Exception:
+        names = []
+    if RESIDENTIAL_NODE_NAME not in names:
+        return {"ok": False, "msg": "住宅代理地址格式无法识别，请检查格式（http://用户名:密码@地址:端口 或 socks5://...）"}
+    if not _mihomo_get("/version"):
+        return {"ok": True, "msg": "已写入配置，mihomo 未运行，点一次“刷新代理”启动后即生效"}
+    config_path = MIHOMO_DIR / "config.yaml"
+    if not _mihomo_put("/configs", {"path": str(config_path)}):
+        return {"ok": False, "msg": "mihomo 配置重载失败"}
+    time.sleep(1)
+    data = _mihomo_get("/proxies")
+    auto = (data or {}).get("proxies", {}).get("AUTO", {})
+    if RESIDENTIAL_NODE_NAME not in (auto.get("all") or []):
+        return {"ok": False, "msg": "住宅代理地址格式无法识别，请检查格式（http://用户名:密码@地址:端口 或 socks5://...）"}
+    if not _mihomo_put("/proxies/AUTO", {"name": RESIDENTIAL_NODE_NAME}):
+        return {"ok": False, "msg": "已写入配置，但切换到住宅代理失败"}
+    time.sleep(1)
+    exit_info = proxy_get_exit_ip()
+    if exit_info.get("ok"):
+        return {"ok": True,
+                "msg": f"住宅代理已生效，出口 {exit_info['ip']}（{exit_info.get('country', '')} {exit_info.get('city', '')}），下次注册会优先走它"}
+    return {"ok": True, "msg": "已切换到住宅代理，但出口验证未返回结果，下次注册时会先试它"}
+
+
 def residential_activate(proxy_str: str) -> dict:
-    """激活住宅代理（写入 mihomo 配置并切换）"""
+    """激活住宅代理：写进 mihomo 配置并立即切换过去，注册会优先走它。"""
     proxies = _load_residential()
     target = None
     for p in proxies:
@@ -645,16 +704,44 @@ def residential_activate(proxy_str: str) -> dict:
     if not target:
         return {"ok": False, "msg": "未找到该代理"}
     _save_residential(proxies)
-    return {"ok": True, "msg": f"已激活住宅代理: {target['name']}（需刷新代理生效）"}
-
-
-def residential_deactivate() -> dict:
-    """停用所有住宅代理"""
-    proxies = _load_residential()
+    result = _apply_residential_to_mihomo()
+    if result["ok"]:
+        return {"ok": True, "msg": f"已激活住宅代理: {target['name']}，{result['msg']}"}
+    # 应用失败时把激活标记撤回，避免下次刷新时又把它加进去
     for p in proxies:
         p["active"] = False
     _save_residential(proxies)
-    return {"ok": True, "msg": "已停用所有住宅代理"}
+    return result
+
+
+def _drop_residential_from_mihomo() -> dict:
+    """按当前住宅代理标记重新生成配置，把住宅代理节点去掉并切回订阅节点。"""
+    if not _regenerate_mihomo_config():
+        return {"ok": False, "msg": "重新生成配置失败，住宅代理可能仍在配置里"}
+    if _mihomo_get("/version"):
+        config_path = MIHOMO_DIR / "config.yaml"
+        _mihomo_put("/configs", {"path": str(config_path)})
+        time.sleep(1)
+        data = _mihomo_get("/proxies")
+        auto = (data or {}).get("proxies", {}).get("AUTO", {})
+        members = [n for n in (auto.get("all") or []) if n != RESIDENTIAL_NODE_NAME]
+        if members:
+            _mihomo_put("/proxies/AUTO", {"name": members[0]})
+        return {"ok": True, "msg": "已从 mihomo 配置里去掉，切回订阅节点"}
+    return {"ok": True, "msg": "mihomo 未运行，下次启动时不再包含它"}
+
+
+def residential_deactivate() -> dict:
+    """停用所有住宅代理：从 mihomo 配置里去掉，切回订阅节点。"""
+    proxies = _load_residential()
+    had_active = any(p.get("active") for p in proxies)
+    for p in proxies:
+        p["active"] = False
+    _save_residential(proxies)
+    if not had_active:
+        return {"ok": True, "msg": "没有正在使用的住宅代理"}
+    result = _drop_residential_from_mihomo()
+    return {"ok": result["ok"], "msg": f"已停用住宅代理，{result['msg']}"}
 
 
 def residential_bulk_add(text: str) -> dict:
